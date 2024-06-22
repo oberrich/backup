@@ -1,3 +1,5 @@
+[![No Maintenance Intended](http://unmaintained.tech/badge.svg)](http://unmaintained.tech/)
+
 # Backup
 A small utility to quickly search all of my disks for certain file extensions.
 

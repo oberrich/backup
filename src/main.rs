@@ -34,6 +34,8 @@ enum ConfigurationFileType {
     Yaml,
     Json,
     Ini,
+    TeamSpeak3, // TODO
+    VSCode, // TODO: (vscode) Should this be split as its program specific and not generic? probably yeah figure it out tomorrow, gn! <3
 }
 
 enum DatabaseFileType {
@@ -65,6 +67,7 @@ enum EntryClassification {
 
 const PLATFORM_DIR_SEP: char = '\\';
 const PLATFORM_SYS_DIR: &str = "C:\\Windows";
+const PLATFORM_TMP_DIR_FMT: &str = "C:\\Users\\{}\\AppData\\{}\\Temp";
 
 trait OptionFlatStringExt {
     fn to_lowercase(&self) -> Option<String>;
@@ -109,6 +112,7 @@ impl DirEntryExt for DirEntry {
         match file_name.to_lowercase().as_deref() {
             Some(".env") => FileClassification::Secret(SecretFileType::Env),
             Some(_) => match extension.to_lowercase().as_deref() {
+                // TODO: Add further excel formats
                 Some("xlsl") => FileClassification::Spreadsheet(SpreadsheetFileType::Excel),
                 Some("csv") => {
                     let mut seps = [
@@ -134,10 +138,9 @@ impl DirEntryExt for DirEntry {
                 }
                 Some("txt") | Some("log") => FileClassification::Document(DocumentFileType::Text),
                 Some("pdf") => FileClassification::Document(DocumentFileType::Pdf),
-                Some(
-                    "rtf" | "xlsx" | "odt" | "xps" | "wps" | "dotx" | "dotm" | "docx" | "docm"
-                    | "doc",
-                ) => FileClassification::Document(DocumentFileType::Word),
+                Some("rtf" | "odt" | "xps" | "wps" | "dotx" | "dotm" | "docx" | "docm" | "doc") => {
+                    FileClassification::Document(DocumentFileType::Word)
+                }
                 Some("db") | Some("dump") => FileClassification::Database(DatabaseFileType::Db),
                 Some("sqlite") | Some("sqlite3") => {
                     FileClassification::Database(DatabaseFileType::Sqlite)
