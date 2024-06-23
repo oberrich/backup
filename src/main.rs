@@ -4,15 +4,9 @@ use core::{
 };
 use once_cell::sync::Lazy;
 use std::{ffi::OsStr, fs};
-use std::{
-    ffi::OsString,
-    os::{
-        raw::{c_char, c_int, c_ulong},
-        windows::ffi::OsStringExt,
-    },
-    ptr::null_mut,
-};
+use std::{ffi::OsString, os::windows::ffi::OsStringExt};
 use walkdir::{DirEntry, WalkDir};
+
 enum VersionControlSystem {
     Git,
     Svn,
@@ -42,8 +36,6 @@ enum ConfigurationFileType {
     Yaml,
     Json,
     Ini,
-    TeamSpeak3, // TODO
-    VSCode, // TODO: (vscode) Should this be split as its program specific and not generic? probably yeah figure it out tomorrow, gn! <3
 }
 
 enum DatabaseFileType {
@@ -93,17 +85,25 @@ struct Platform {
 
 #[link(name = "secur32")]
 extern "system" {
-    fn GetUserNameW(buf: *mut c_char, len: *mut c_ulong) -> c_int;
+    fn GetUserNameW(buf: *mut u16, len: *mut u32) -> u32;
 }
 
 static PLATFORM: Lazy<Platform> = Lazy::new(|| unsafe {
-    let mut name_buf: Vec<u16> = Vec::with_capacity(64);
-    if GetUserNameW(name_buf.as_mut_ptr().cast(), null_mut()) == 0 {
+    let mut buf = [0u16; 64];
+    #[allow(clippy::cast_possible_truncation)]
+    let mut len: u32 = buf.len() as u32;
+
+    if GetUserNameW(buf.as_mut_ptr(), &mut len) == 0 {
         panic!("failed to get user name");
     }
 
-    let name_os = OsString::from_wide(&name_buf);
-    let name = name_os.as_os_str().to_string_lossy().into_owned();
+    // ensure string is terminated
+    buf[buf.len() - 1] = u16::default();
+
+    let name = OsString::from_wide(&buf)
+        .as_os_str()
+        .to_string_lossy()
+        .into_owned();
 
     Platform {
         fs_dir_sep: '\\',
@@ -124,12 +124,10 @@ trait DirEntryExt {
 
 impl DirEntryExt for DirEntry {
     fn is_blacklisted(&self) -> bool {
-        let platform = &*PLATFORM;
-
         self.path()
             .file_name()
             .and_then(OsStr::to_str)
-            .map(|path| path == platform.sys_dir || path == platform.tmp_dir)
+            .map(|path| path == PLATFORM.sys_dir || path == PLATFORM.tmp_dir)
             .unwrap_or(false)
     }
 
@@ -144,9 +142,10 @@ impl DirEntryExt for DirEntry {
         match file_name.to_lowercase().as_deref() {
             Some(".env") => FileClassification::Secret(SecretFileType::Env),
             Some(_) => match extension.to_lowercase().as_deref() {
-                // TODO: Add further excel formats
-                Some("xlsl") => FileClassification::Spreadsheet(SpreadsheetFileType::Excel),
-                Some("csv") => {
+                Some(
+                    "xlw" | "xlr" | "xls" | "xlsl" | "xlsb" | "xltx" | "xltm" | "xlam" | "xla",
+                ) => FileClassification::Spreadsheet(SpreadsheetFileType::Excel),
+                Some("csv" | "prn") => {
                     let mut seps = [
                         (char::default(), 1usize),
                         (',', 0),
@@ -168,16 +167,16 @@ impl DirEntryExt for DirEntry {
                     seps.sort_by(|a, b| b.1.cmp(&a.1));
                     FileClassification::Spreadsheet(SpreadsheetFileType::Csv(seps[0].0))
                 }
-                Some("txt") | Some("log") => FileClassification::Document(DocumentFileType::Text),
+                Some("txt" | "log") => FileClassification::Document(DocumentFileType::Text),
                 Some("pdf") => FileClassification::Document(DocumentFileType::Pdf),
                 Some("rtf" | "odt" | "xps" | "wps" | "dotx" | "dotm" | "docx" | "docm" | "doc") => {
                     FileClassification::Document(DocumentFileType::Word)
                 }
-                Some("db") | Some("dump") => FileClassification::Database(DatabaseFileType::Db),
-                Some("sqlite") | Some("sqlite3") => {
+                Some("db" | "dump") => FileClassification::Database(DatabaseFileType::Db),
+                Some("sqlite" | "sqlite3") => {
                     FileClassification::Database(DatabaseFileType::Sqlite)
                 }
-                Some("sql") | Some("mysql") | Some("pgsql") => {
+                Some("sql" | "mysql" | "pgsql") => {
                     FileClassification::Database(DatabaseFileType::Sql)
                 }
                 Some("pdb") => FileClassification::Database(DatabaseFileType::Pdb),
@@ -268,7 +267,7 @@ impl Display for EntryClassification {
 }
 
 fn scan_drive(letter: char) -> anyhow::Result<()> {
-    for entry in WalkDir::new(format!("{}:{}", letter, PLATFORM_DIR_SEP))
+    for entry in WalkDir::new(format!("{}:{}", letter, PLATFORM.fs_dir_sep))
         .follow_links(true)
         .into_iter()
         .filter_entry(|e| e.is_allowed())
