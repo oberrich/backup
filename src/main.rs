@@ -2,9 +2,17 @@ use core::{
     fmt,
     fmt::{Display, Formatter},
 };
+use once_cell::sync::Lazy;
 use std::{ffi::OsStr, fs};
+use std::{
+    ffi::OsString,
+    os::{
+        raw::{c_char, c_int, c_ulong},
+        windows::ffi::OsStringExt,
+    },
+    ptr::null_mut,
+};
 use walkdir::{DirEntry, WalkDir};
-
 enum VersionControlSystem {
     Git,
     Svn,
@@ -65,10 +73,6 @@ enum EntryClassification {
     Dir(DirectoryClassification),
 }
 
-const PLATFORM_DIR_SEP: char = '\\';
-const PLATFORM_SYS_DIR: &str = "C:\\Windows";
-const PLATFORM_TMP_DIR_FMT: &str = "C:\\Users\\{}\\AppData\\{}\\Temp";
-
 trait OptionFlatStringExt {
     fn to_lowercase(&self) -> Option<String>;
 }
@@ -79,26 +83,54 @@ impl OptionFlatStringExt for Option<&OsStr> {
     }
 }
 
+struct Platform {
+    fs_dir_sep: char,
+    sys_dir: String,
+    user_dir: String,
+    app_data: String,
+    tmp_dir: String,
+}
+
+#[link(name = "secur32")]
+extern "system" {
+    fn GetUserNameW(buf: *mut c_char, len: *mut c_ulong) -> c_int;
+}
+
+static PLATFORM: Lazy<Platform> = Lazy::new(|| unsafe {
+    let mut name_buf: Vec<u16> = Vec::with_capacity(64);
+    if GetUserNameW(name_buf.as_mut_ptr().cast(), null_mut()) == 0 {
+        panic!("failed to get user name");
+    }
+
+    let name_os = OsString::from_wide(&name_buf);
+    let name = name_os.as_os_str().to_string_lossy().into_owned();
+
+    Platform {
+        fs_dir_sep: '\\',
+        sys_dir: "C:\\Windows".into(),
+        user_dir: format!("C:\\users\\{}", name),
+        app_data: format!("C:\\users\\{}\\appdata", name),
+        tmp_dir: format!("C:\\users\\{}\\appdata\\local\\temp", name),
+    }
+});
+
 trait DirEntryExt {
     fn classify(&self) -> EntryClassification;
     fn classify_dir(&self) -> DirectoryClassification;
     fn classify_file(&self) -> FileClassification;
     fn is_allowed(&self) -> bool;
     fn is_blacklisted(&self) -> bool;
-    fn is_sys_dir(&self) -> bool;
 }
 
 impl DirEntryExt for DirEntry {
-    fn is_sys_dir(&self) -> bool {
+    fn is_blacklisted(&self) -> bool {
+        let platform = &*PLATFORM;
+
         self.path()
             .file_name()
             .and_then(OsStr::to_str)
-            .map(|s| s == PLATFORM_SYS_DIR)
+            .map(|path| path == platform.sys_dir || path == platform.tmp_dir)
             .unwrap_or(false)
-    }
-
-    fn is_blacklisted(&self) -> bool {
-        self.is_sys_dir()
     }
 
     fn is_allowed(&self) -> bool {
