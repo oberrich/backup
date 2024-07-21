@@ -1,16 +1,18 @@
+use chrono::{DateTime, Utc};
 use core::ptr::addr_of_mut;
 use core::{
     fmt,
     fmt::{Display, Formatter},
 };
 use once_cell::sync::Lazy;
+use serde_json::{Result, Value};
 use std::collections::btree_map::Entry::{Occupied, Vacant};
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::ffi::OsString;
 use std::fs;
 use std::fs::File;
-use std::io::Read;
+use std::io::{BufReader, Read};
 use std::os::windows::ffi::OsStringExt;
 use walkdir::{DirEntry, WalkDir};
 
@@ -292,6 +294,7 @@ impl Display for EntryClassification {
 
 fn scan_drive(root: &str, has_tag: bool) -> anyhow::Result<()> {
     //let mut og_tags = HashSet::<String>::new();
+    let mut duplicates = 0usize;
 
     for entry in WalkDir::new(root)
         .follow_links(true)
@@ -336,51 +339,63 @@ fn scan_drive(root: &str, has_tag: bool) -> anyhow::Result<()> {
             let file_name = entry.file_name().to_string_lossy().into_owned();
             let file_hash = blake3::hash(&buffer);
 
-            // TODO: Dont global this fucker
-            unsafe {
-                match RECORDS.entry(file_hash.to_string()) {
-                    Vacant(vacant) => {
-                        vacant.insert(record::Item {
-                            path: file_path,
-                            name: file_name,
-                            tags: owned_tag.map(|t| HashSet::from([t])).unwrap_or_default(),
-                            name_from_meta: false,
-                        });
-                    }
-                    Occupied(mut occupant) => {
-                        let record = occupant.get_mut();
-                        println!("duplicate document: {}", record.name);
+            let mut metadata_pb = entry.path().to_path_buf();
+            metadata_pb.pop();
+            metadata_pb.pop();
+            metadata_pb.push("metadata.json");
 
-                        if !record.name_from_meta && record.name.len() < file_name.len() {
-                            println!("rename {} to {}", record.name, file_name);
-                            record.name = file_name;
-                        }
+            let (meta_name, meta_date) = if let Ok(meta_file) = File::open(&metadata_pb) {
+                let meta_reader = BufReader::new(meta_file);
+                let meta_data: Value = serde_json::from_reader(meta_reader)?;
+
+                (
+                    Some(meta_data["name"].as_str().unwrap().to_owned()),
+                    chrono::DateTime::<Utc>::from_timestamp_millis(
+                        meta_data["date"].as_i64().expect("has no date"),
+                    ),
+                )
+            } else {
+                (None, None)
+            };
+
+            let has_metadata = meta_name.is_some();
+            assert_eq!(has_metadata, meta_date.is_some());
+
+            if has_metadata {
+                println!(
+                    "meta name: {}, date: {}",
+                    meta_name.as_ref().unwrap_or(&"none".to_owned()),
+                    meta_date.expect("non-zero date").to_rfc3339()
+                );
+            }
+
+            match unsafe { RECORDS.entry(file_hash.to_string()) } {
+                Vacant(vacant) => {
+                    vacant.insert(record::Item {
+                        path: file_path,
+                        name: meta_name.unwrap_or(file_name),
+                        tags: owned_tag.map(|t| HashSet::from([t])).unwrap_or_default(),
+                        name_from_meta: has_metadata,
+                    });
+                }
+                Occupied(mut occupant) => {
+                    let record = occupant.get_mut();
+                    //println!("duplicate: {} ({})", record.name, file_hash);
+                    duplicates += 1;
+
+                    if has_metadata && !record.name_from_meta {
+                        println!("from metadata: {} ({})", record.name, file_hash);
+                        record.name = meta_name.unwrap_or(file_name);
+                        record.name_from_meta = true;
                     }
                 }
             }
         }
 
-        // (See tags.txt for tags)
-        // TODO: Disable json
-        // TODO: Parse metadata
-        // TODO: blake3 hash that bitch and use as btreemap key
-        // TODO: Use `paperless` crate to POST to paperless-ngx REST API (see https://docs.paperless-ngx.com/api/)
-        // TODO: Flatten directory structure to primary_tag/2024-07-18 Document_Title_Thing, I guess?
-
-        //let line = format!("{} # {}", entry.path().display(), classification);
-
-        /*let re = Regex::new(r"by_tag\\(\w*)\W").unwrap();
-        let Some((_, [tag])) = re.captures(line.as_str()).map(|caps| caps.extract()) else {
-            println!("no match!");
-            return Ok(());
-        };
-
-        og_tags.insert(tag.into());*/
+        // TODO: Flatten directory structure to primary_tag/2024-07-18 Document_Title_Thing (sanitize?)
     }
 
-    /*for tag in &og_tags {
-        println!("{tag}");
-    }*/
+    println!("filtered {} duplicates", duplicates);
 
     Ok(())
 }
@@ -403,11 +418,13 @@ fn main() -> anyhow::Result<()> {
         for (hash, item) in &mut *addr_of_mut!(RECORDS) {
             if !item.tags.is_empty() {
                 tagged += 1;
-                continue;
+                println!("{}: `C:\\tagged\\{}`", hash, item.name);
+                //continue;
+            } else {
+                untagged += 1;
+                //println!("{}: `C:\\untagged\\{}`", hash, item.name);
+                fs::copy(&item.path, format!("C:\\untagged\\{}", item.name))?;
             }
-            untagged += 1;
-            println!("{}: `C:\\untagged\\{}`", hash, item.name);
-            fs::copy(&item.path, format!("C:\\untagged\\{}", item.name))?;
         }
     }
 
