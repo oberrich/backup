@@ -1,3 +1,4 @@
+use anyhow::Error;
 use chrono::{DateTime, Utc};
 use core::ptr::addr_of_mut;
 use core::{
@@ -10,13 +11,11 @@ use std::collections::btree_map::Entry::{Occupied, Vacant};
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::ffi::OsString;
-use std::fs;
 use std::fs::File;
 use std::io::{BufReader, Read};
 use std::os::windows::ffi::OsStringExt;
+use std::{default, fs};
 use walkdir::{DirEntry, WalkDir};
-
-use regex::Regex;
 
 use std::collections::HashSet;
 
@@ -292,8 +291,7 @@ impl Display for EntryClassification {
     }
 }
 
-fn scan_drive(root: &str, has_tag: bool) -> anyhow::Result<()> {
-    //let mut og_tags = HashSet::<String>::new();
+fn scan_drive(root: &str) -> anyhow::Result<()> {
     let mut duplicates = 0usize;
 
     for entry in WalkDir::new(root)
@@ -316,66 +314,76 @@ fn scan_drive(root: &str, has_tag: bool) -> anyhow::Result<()> {
         if let EntryClassification::File(FileClassification::Document(DocumentFileType::Pdf)) =
             &classification
         {
-            let owned_tag = if has_tag {
-                let re = Regex::new(r"by_tag\\(\w*)\W").unwrap();
-                let Some((_, [tag])) = re
-                    .captures(entry.path().to_str().unwrap())
-                    .map(|caps| caps.extract())
-                else {
-                    println!("no match!");
-                    return Ok(());
-                };
-                Some(tag.to_owned())
+            let docspell_meta_data = if let Some(parent) = entry.path().parent() {
+                if let Some("files") = unsafe { parent.file_name().unwrap_unchecked() }.to_str() {}
+                if parent.ancestors().any(|a| a.ends_with("by_tag")) {
+                    let mut metadata_pb = entry.path().to_path_buf();
+                    metadata_pb.pop();
+                    metadata_pb.pop();
+                    metadata_pb.push("metadata.json");
+
+                    // println!("{}", metadata_pb.as_path().display());
+
+                    if let Ok(meta_file) = File::open(&metadata_pb) {
+                        let meta_reader = BufReader::new(meta_file);
+                        let meta_data: Value = serde_json::from_reader(meta_reader)?;
+
+                        Some((
+                            meta_data["name"].as_str().unwrap().to_owned(),
+                            chrono::DateTime::<Utc>::from_timestamp_millis(
+                                meta_data["date"].as_i64().expect("has no date"),
+                            )
+                            .unwrap(),
+                            meta_data["tags"]
+                                .as_array()
+                                .unwrap()
+                                .iter()
+                                .map(|v| {
+                                    v.as_object()
+                                        .unwrap()
+                                        .get("name")
+                                        .unwrap()
+                                        .as_str()
+                                        .unwrap_or_default()
+                                        .to_owned()
+                                })
+                                .collect::<HashSet<String>>(),
+                        ))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
             } else {
                 None
             };
 
+            let has_meta_data = docspell_meta_data.is_some();
+
             let file_path = entry.path().to_string_lossy().into_owned();
+            let file_name = entry.file_name().to_string_lossy().into_owned();
+
             let mut file = File::open(&file_path).expect("failed to open pdf");
             let metadata = fs::metadata(entry.path()).expect("unable to read metadata");
             let mut buffer = vec![0; metadata.len() as usize];
             file.read_exact(&mut buffer).expect("buffer overflow");
 
-            let file_name = entry.file_name().to_string_lossy().into_owned();
             let file_hash = blake3::hash(&buffer);
 
-            let mut metadata_pb = entry.path().to_path_buf();
-            metadata_pb.pop();
-            metadata_pb.pop();
-            metadata_pb.push("metadata.json");
-
-            let (meta_name, meta_date) = if let Ok(meta_file) = File::open(&metadata_pb) {
-                let meta_reader = BufReader::new(meta_file);
-                let meta_data: Value = serde_json::from_reader(meta_reader)?;
-
-                (
-                    Some(meta_data["name"].as_str().unwrap().to_owned()),
-                    chrono::DateTime::<Utc>::from_timestamp_millis(
-                        meta_data["date"].as_i64().expect("has no date"),
-                    ),
-                )
+            let (item_name, item_date, item_tags) = if let Some(meta) = docspell_meta_data {
+                meta
             } else {
-                (None, None)
+                (file_name, DateTime::default(), HashSet::<String>::default())
             };
-
-            let has_metadata = meta_name.is_some();
-            assert_eq!(has_metadata, meta_date.is_some());
-
-            if has_metadata {
-                println!(
-                    "meta name: {}, date: {}",
-                    meta_name.as_ref().unwrap_or(&"none".to_owned()),
-                    meta_date.expect("non-zero date").to_rfc3339()
-                );
-            }
 
             match unsafe { RECORDS.entry(file_hash.to_string()) } {
                 Vacant(vacant) => {
                     vacant.insert(record::Item {
                         path: file_path,
-                        name: meta_name.unwrap_or(file_name),
-                        tags: owned_tag.map(|t| HashSet::from([t])).unwrap_or_default(),
-                        name_from_meta: has_metadata,
+                        name: item_name,
+                        tags: item_tags,
+                        name_from_meta: has_meta_data,
                     });
                 }
                 Occupied(mut occupant) => {
@@ -383,9 +391,9 @@ fn scan_drive(root: &str, has_tag: bool) -> anyhow::Result<()> {
                     //println!("duplicate: {} ({})", record.name, file_hash);
                     duplicates += 1;
 
-                    if has_metadata && !record.name_from_meta {
-                        println!("from metadata: {} ({})", record.name, file_hash);
-                        record.name = meta_name.unwrap_or(file_name);
+                    if has_meta_data && !record.name_from_meta {
+                        record.tags.extend(item_tags);
+                        record.name = item_name;
                         record.name_from_meta = true;
                     }
                 }
@@ -404,31 +412,37 @@ fn main() -> anyhow::Result<()> {
     let _ = fs::remove_dir_all("C:\\untagged");
     fs::create_dir("C:\\untagged")?;
 
-    scan_drive(
-        r#"C:\Users\root\Desktop\business\docspell-export-backup-scans-folder\docspell-export\business\by_tag"#,
-        true,
-    )?;
-    scan_drive(r#"C:\Users\root\Desktop\business\0"#, false)?;
+    //scan_drive(
+    // r#"C:\Users\root\Desktop\business\docspell-export-backup-scans-folder\docspell-export\business\by_tag"#,
+    //     true,
+    //)?;
+    scan_drive(r#"C:\Users\root\Desktop\business\0"#)?;
 
     let mut tagged = 0usize;
     let mut untagged = 0usize;
     // tagged: 369, untagged: 928
+    // tagged: 489, untagged: 1255
+    // tagged: 489, untagged: 808
 
     unsafe {
         for (hash, item) in &mut *addr_of_mut!(RECORDS) {
             if !item.tags.is_empty() {
                 tagged += 1;
-                println!("{}: `C:\\tagged\\{}`", hash, item.name);
+                println!(
+                    "{}: `C:\\tagged\\{} ({})`",
+                    hash,
+                    item.name,
+                    Vec::from_iter(item.tags.clone()).join(", ")
+                );
                 //continue;
             } else {
                 untagged += 1;
-                //println!("{}: `C:\\untagged\\{}`", hash, item.name);
-                fs::copy(&item.path, format!("C:\\untagged\\{}", item.name))?;
+                // println!("{}: `C:\\untagged\\{}`", hash, item.name);
+                //fs::copy(&item.path, format!("C:\\untagged\\{}", item.name))?;
             }
         }
     }
 
     println!("tagged: {}, untagged: {}", tagged, untagged);
-
     Ok(())
 }
