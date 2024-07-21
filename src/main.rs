@@ -315,14 +315,13 @@ fn scan_drive(root: &str) -> anyhow::Result<()> {
             &classification
         {
             let docspell_meta_data = if let Some(parent) = entry.path().parent() {
-                if let Some("files") = unsafe { parent.file_name().unwrap_unchecked() }.to_str() {}
                 if parent.ancestors().any(|a| a.ends_with("by_tag")) {
+                    assert_eq!(parent.file_name().unwrap().to_str().unwrap(), "files");
+
                     let mut metadata_pb = entry.path().to_path_buf();
                     metadata_pb.pop();
                     metadata_pb.pop();
                     metadata_pb.push("metadata.json");
-
-                    // println!("{}", metadata_pb.as_path().display());
 
                     if let Ok(meta_file) = File::open(&metadata_pb) {
                         let meta_reader = BufReader::new(meta_file);
@@ -379,6 +378,7 @@ fn scan_drive(root: &str) -> anyhow::Result<()> {
 
             match unsafe { RECORDS.entry(file_hash.to_string()) } {
                 Vacant(vacant) => {
+                    // TODO: add `item_date` to `record::Item`
                     vacant.insert(record::Item {
                         path: file_path,
                         name: item_name,
