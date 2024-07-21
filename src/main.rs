@@ -1,11 +1,35 @@
+use core::ptr::addr_of_mut;
 use core::{
     fmt,
     fmt::{Display, Formatter},
 };
 use once_cell::sync::Lazy;
-use std::{ffi::OsStr, fs};
-use std::{ffi::OsString, os::windows::ffi::OsStringExt};
+use std::collections::btree_map::Entry::{Occupied, Vacant};
+use std::collections::BTreeMap;
+use std::ffi::OsStr;
+use std::ffi::OsString;
+use std::fs;
+use std::fs::File;
+use std::io::Read;
+use std::os::windows::ffi::OsStringExt;
 use walkdir::{DirEntry, WalkDir};
+
+use regex::Regex;
+
+use std::collections::HashSet;
+
+mod record {
+    use std::collections::HashSet;
+
+    pub struct Item {
+        pub path: String,
+        pub name: String,
+        pub tags: HashSet<String>,
+        pub name_from_meta: bool,
+    }
+}
+
+static mut RECORDS: BTreeMap<String, record::Item> = BTreeMap::new();
 
 enum VersionControlSystem {
     Git,
@@ -266,8 +290,10 @@ impl Display for EntryClassification {
     }
 }
 
-fn scan_drive(letter: char) -> anyhow::Result<()> {
-    for entry in WalkDir::new(format!("{}:{}", letter, PLATFORM.fs_dir_sep))
+fn scan_drive(root: &str, has_tag: bool) -> anyhow::Result<()> {
+    //let mut og_tags = HashSet::<String>::new();
+
+    for entry in WalkDir::new(root)
         .follow_links(true)
         .into_iter()
         .filter_entry(|e| e.is_allowed())
@@ -275,26 +301,117 @@ fn scan_drive(letter: char) -> anyhow::Result<()> {
     {
         let classification = entry.classify();
         match &classification {
-            EntryClassification::File(class) => match class {
+            EntryClassification::File(
                 FileClassification::Regular
                 | FileClassification::Document(DocumentFileType::Text)
-                | FileClassification::Spreadsheet(SpreadsheetFileType::Csv('\0')) => continue,
-                _ => {}
-            },
+                | FileClassification::Spreadsheet(SpreadsheetFileType::Csv('\0')),
+            ) => continue,
             EntryClassification::Dir(DirectoryClassification::Regular) => continue,
             _ => {}
         }
 
-        println!("{} # {}", entry.path().display(), classification);
+        if let EntryClassification::File(FileClassification::Document(DocumentFileType::Pdf)) =
+            &classification
+        {
+            let owned_tag = if has_tag {
+                let re = Regex::new(r"by_tag\\(\w*)\W").unwrap();
+                let Some((_, [tag])) = re
+                    .captures(entry.path().to_str().unwrap())
+                    .map(|caps| caps.extract())
+                else {
+                    println!("no match!");
+                    return Ok(());
+                };
+                Some(tag.to_owned())
+            } else {
+                None
+            };
+
+            let file_path = entry.path().to_string_lossy().into_owned();
+            let mut file = File::open(&file_path).expect("failed to open pdf");
+            let metadata = fs::metadata(entry.path()).expect("unable to read metadata");
+            let mut buffer = vec![0; metadata.len() as usize];
+            file.read_exact(&mut buffer).expect("buffer overflow");
+
+            let file_name = entry.file_name().to_string_lossy().into_owned();
+            let file_hash = blake3::hash(&buffer);
+
+            // TODO: Dont global this fucker
+            unsafe {
+                match RECORDS.entry(file_hash.to_string()) {
+                    Vacant(vacant) => {
+                        vacant.insert(record::Item {
+                            path: file_path,
+                            name: file_name,
+                            tags: owned_tag.map(|t| HashSet::from([t])).unwrap_or_default(),
+                            name_from_meta: false,
+                        });
+                    }
+                    Occupied(mut occupant) => {
+                        let record = occupant.get_mut();
+                        println!("duplicate document: {}", record.name);
+
+                        if !record.name_from_meta && record.name.len() < file_name.len() {
+                            println!("rename {} to {}", record.name, file_name);
+                            record.name = file_name;
+                        }
+                    }
+                }
+            }
+        }
+
+        // (See tags.txt for tags)
+        // TODO: Disable json
+        // TODO: Parse metadata
+        // TODO: blake3 hash that bitch and use as btreemap key
+        // TODO: Use `paperless` crate to POST to paperless-ngx REST API (see https://docs.paperless-ngx.com/api/)
+        // TODO: Flatten directory structure to primary_tag/2024-07-18 Document_Title_Thing, I guess?
+
+        //let line = format!("{} # {}", entry.path().display(), classification);
+
+        /*let re = Regex::new(r"by_tag\\(\w*)\W").unwrap();
+        let Some((_, [tag])) = re.captures(line.as_str()).map(|caps| caps.extract()) else {
+            println!("no match!");
+            return Ok(());
+        };
+
+        og_tags.insert(tag.into());*/
     }
+
+    /*for tag in &og_tags {
+        println!("{tag}");
+    }*/
 
     Ok(())
 }
 
 fn main() -> anyhow::Result<()> {
-    for letter in 'A'..='Z' {
-        scan_drive(letter)?;
+    let _ = fs::remove_dir_all("C:\\untagged");
+    fs::create_dir("C:\\untagged")?;
+
+    scan_drive(
+        r#"C:\Users\root\Desktop\business\docspell-export-backup-scans-folder\docspell-export\business\by_tag"#,
+        true,
+    )?;
+    scan_drive(r#"C:\Users\root\Desktop\business\0"#, false)?;
+
+    let mut tagged = 0usize;
+    let mut untagged = 0usize;
+    // tagged: 369, untagged: 928
+
+    unsafe {
+        for (hash, item) in &mut *addr_of_mut!(RECORDS) {
+            if !item.tags.is_empty() {
+                tagged += 1;
+                continue;
+            }
+            untagged += 1;
+            println!("{}: `C:\\untagged\\{}`", hash, item.name);
+            fs::copy(&item.path, format!("C:\\untagged\\{}", item.name))?;
+        }
     }
+
+    println!("tagged: {}, untagged: {}", tagged, untagged);
 
     Ok(())
 }
