@@ -448,7 +448,7 @@ fn main() -> anyhow::Result<()> {
                 sanitize(&item.name)
             );
 
-            // TODO: Add tags to folder structure (parse tag category, prefer "business" over "private")
+            // TODO: Add tags to folder structure (parse tag category meta_data["category"], prefer "business" over "private")
             println!("copy `{}` -> `{}` ({})", &item.path, &new_path, tags);
             fs::copy(&item.path, &new_path).expect("failed to copy");
         });
