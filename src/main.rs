@@ -6,7 +6,9 @@ use core::{
     fmt::{Display, Formatter},
 };
 use once_cell::sync::Lazy;
+use sanitize_filename_reader_friendly::sanitize;
 use serde_json::{Result, Value};
+use std::borrow::BorrowMut;
 use std::collections::btree_map::Entry::{Occupied, Vacant};
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
@@ -22,9 +24,12 @@ use std::collections::HashSet;
 mod record {
     use std::collections::HashSet;
 
+    use chrono::{DateTime, Utc};
+
     pub struct Item {
         pub path: String,
         pub name: String,
+        pub date: DateTime<Utc>,
         pub tags: HashSet<String>,
         pub name_from_meta: bool,
     }
@@ -329,7 +334,7 @@ fn scan_drive(root: &str) -> anyhow::Result<()> {
 
                         Some((
                             meta_data["name"].as_str().unwrap().to_owned(),
-                            chrono::DateTime::<Utc>::from_timestamp_millis(
+                            DateTime::<Utc>::from_timestamp_millis(
                                 meta_data["date"].as_i64().expect("has no date"),
                             )
                             .unwrap(),
@@ -360,15 +365,12 @@ fn scan_drive(root: &str) -> anyhow::Result<()> {
 
             let has_meta_data = docspell_meta_data.is_some();
 
-            let file_path = entry.path().to_string_lossy().into_owned();
-            let file_name = entry.file_name().to_string_lossy().into_owned();
-
-            let mut file = File::open(&file_path).expect("failed to open pdf");
-            let metadata = fs::metadata(entry.path()).expect("unable to read metadata");
-            let mut buffer = vec![0; metadata.len() as usize];
-            file.read_exact(&mut buffer).expect("buffer overflow");
-
-            let file_hash = blake3::hash(&buffer);
+            let file_name = entry
+                .path()
+                .file_stem()
+                .unwrap_or(entry.path().file_name().unwrap())
+                .to_string_lossy()
+                .into_owned();
 
             let (item_name, item_date, item_tags) = if let Some(meta) = docspell_meta_data {
                 meta
@@ -376,46 +378,46 @@ fn scan_drive(root: &str) -> anyhow::Result<()> {
                 (file_name, DateTime::default(), HashSet::<String>::default())
             };
 
-            match unsafe { RECORDS.entry(file_hash.to_string()) } {
+            let mut file = File::open(entry.path()).expect("failed to open pdf");
+            let metadata = fs::metadata(entry.path()).expect("unable to read metadata");
+            let mut buffer = vec![0; metadata.len() as usize];
+            file.read_exact(&mut buffer).expect("buffer overflow");
+
+            match unsafe { RECORDS.entry(blake3::hash(&buffer).to_string()) } {
                 Vacant(vacant) => {
-                    // TODO: add `item_date` to `record::Item`
                     vacant.insert(record::Item {
-                        path: file_path,
+                        path: entry.path().to_string_lossy().into_owned(),
                         name: item_name,
+                        date: item_date,
                         tags: item_tags,
                         name_from_meta: has_meta_data,
                     });
                 }
                 Occupied(mut occupant) => {
                     let record = occupant.get_mut();
-                    //println!("duplicate: {} ({})", record.name, file_hash);
                     duplicates += 1;
 
                     if has_meta_data && !record.name_from_meta {
                         record.tags.extend(item_tags);
                         record.name = item_name;
+                        record.date = item_date;
                         record.name_from_meta = true;
                     }
                 }
             }
         }
-
-        // TODO: Flatten directory structure to primary_tag/2024-07-18 Document_Title_Thing (sanitize?)
     }
 
-    println!("filtered {} duplicates", duplicates);
-
+    println!("removed {} duplicates", duplicates);
     Ok(())
 }
 
 fn main() -> anyhow::Result<()> {
+    let _ = fs::remove_dir_all("C:\\tagged");
     let _ = fs::remove_dir_all("C:\\untagged");
+    fs::create_dir("C:\\tagged")?;
     fs::create_dir("C:\\untagged")?;
 
-    //scan_drive(
-    // r#"C:\Users\root\Desktop\business\docspell-export-backup-scans-folder\docspell-export\business\by_tag"#,
-    //     true,
-    //)?;
     scan_drive(r#"C:\Users\root\Desktop\business\0"#)?;
 
     let mut tagged = 0usize;
@@ -425,22 +427,31 @@ fn main() -> anyhow::Result<()> {
     // tagged: 489, untagged: 808
 
     unsafe {
-        for (hash, item) in &mut *addr_of_mut!(RECORDS) {
-            if !item.tags.is_empty() {
-                tagged += 1;
-                println!(
-                    "{}: `C:\\tagged\\{} ({})`",
-                    hash,
-                    item.name,
-                    Vec::from_iter(item.tags.clone()).join(", ")
-                );
-                //continue;
+        RECORDS.values().for_each(|item| {
+            let has_tags = !item.tags.is_empty();
+            if has_tags {
+                tagged += 1
             } else {
-                untagged += 1;
-                // println!("{}: `C:\\untagged\\{}`", hash, item.name);
-                //fs::copy(&item.path, format!("C:\\untagged\\{}", item.name))?;
-            }
-        }
+                untagged += 1
+            };
+
+            let tags = if has_tags {
+                Vec::from_iter(item.tags.clone()).join(", ")
+            } else {
+                String::default()
+            };
+
+            let new_path = format!(
+                r#"C:\{}\{} {}.pdf"#,
+                if has_tags { "tagged" } else { "untagged" },
+                item.date.format("%Y-%m-%d"),
+                sanitize(&item.name)
+            );
+
+            // TODO: Add tags to folder structure (parse tag category, prefer "business" over "private")
+            println!("copy `{}` -> `{}` ({})", &item.path, &new_path, tags);
+            fs::copy(&item.path, &new_path).expect("failed to copy");
+        });
     }
 
     println!("tagged: {}, untagged: {}", tagged, untagged);
