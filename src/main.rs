@@ -6,9 +6,10 @@ use core::{
     fmt::{Display, Formatter},
 };
 use once_cell::sync::Lazy;
+use record::Tag;
 use sanitize_filename_reader_friendly::sanitize;
 use serde_json::{Result, Value};
-use std::borrow::BorrowMut;
+use std::borrow::{Borrow, BorrowMut};
 use std::collections::btree_map::Entry::{Occupied, Vacant};
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
@@ -26,12 +27,19 @@ mod record {
 
     use chrono::{DateTime, Utc};
 
+    #[derive(Hash, Eq, PartialEq, Debug, Clone)]
+    pub struct Tag {
+        pub name: String,
+        pub category: String,
+    }
+
+    #[derive(Default, Eq, PartialEq, Debug, Clone)]
     pub struct Item {
         pub path: String,
         pub name: String,
         pub date: DateTime<Utc>,
-        pub tags: HashSet<String>,
-        pub name_from_meta: bool,
+        pub tags: HashSet<Tag>,
+        pub from_metadata: bool,
     }
 }
 
@@ -296,6 +304,13 @@ impl Display for EntryClassification {
     }
 }
 
+struct MetaData {
+    name: String,
+    date: DateTime<Utc>,
+    tags: HashSet<String>,
+    category: String,
+}
+
 fn scan_drive(root: &str) -> anyhow::Result<()> {
     let mut duplicates = 0usize;
 
@@ -319,7 +334,8 @@ fn scan_drive(root: &str) -> anyhow::Result<()> {
         if let EntryClassification::File(FileClassification::Document(DocumentFileType::Pdf)) =
             &classification
         {
-            let docspell_meta_data = if let Some(parent) = entry.path().parent() {
+            let path = entry.path().to_string_lossy().into_owned();
+            let docspell_item = if let Some(parent) = entry.path().parent() {
                 if parent.ancestors().any(|a| a.ends_with("by_tag")) {
                     assert_eq!(parent.file_name().unwrap().to_str().unwrap(), "files");
 
@@ -332,27 +348,29 @@ fn scan_drive(root: &str) -> anyhow::Result<()> {
                         let meta_reader = BufReader::new(meta_file);
                         let meta_data: Value = serde_json::from_reader(meta_reader)?;
 
-                        Some((
-                            meta_data["name"].as_str().unwrap().to_owned(),
-                            DateTime::<Utc>::from_timestamp_millis(
-                                meta_data["date"].as_i64().expect("has no date"),
-                            )
-                            .unwrap(),
-                            meta_data["tags"]
-                                .as_array()
-                                .unwrap()
-                                .iter()
-                                .map(|v| {
-                                    v.as_object()
-                                        .unwrap()
-                                        .get("name")
-                                        .unwrap()
-                                        .as_str()
-                                        .unwrap_or_default()
-                                        .to_owned()
-                                })
-                                .collect::<HashSet<String>>(),
-                        ))
+                        let name = meta_data["name"].as_str().unwrap().to_owned();
+                        let date = DateTime::<Utc>::from_timestamp_millis(
+                            meta_data["date"].as_i64().expect("has no date"),
+                        )
+                        .unwrap();
+
+                        let tags = HashSet::from_iter(
+                            meta_data["tags"].as_array().unwrap().iter().map(|v| {
+                                let meta = v.as_object().unwrap();
+                                record::Tag {
+                                    name: meta["name"].as_str().unwrap().to_owned(),
+                                    category: meta["category"].as_str().unwrap().to_owned(),
+                                }
+                            }),
+                        );
+
+                        Some(record::Item {
+                            path: path.clone(),
+                            name,
+                            date,
+                            tags,
+                            from_metadata: true,
+                        })
                     } else {
                         None
                     }
@@ -363,19 +381,26 @@ fn scan_drive(root: &str) -> anyhow::Result<()> {
                 None
             };
 
-            let has_meta_data = docspell_meta_data.is_some();
-
-            let file_name = entry
-                .path()
-                .file_stem()
-                .unwrap_or(entry.path().file_name().unwrap())
-                .to_string_lossy()
-                .into_owned();
-
-            let (item_name, item_date, item_tags) = if let Some(meta) = docspell_meta_data {
-                meta
+            let (item, has_metadata) = if let Some(item) = docspell_item {
+                (item, true)
             } else {
-                (file_name, DateTime::default(), HashSet::<String>::default())
+                let file_name = entry
+                    .path()
+                    .file_stem()
+                    .unwrap_or(entry.path().file_name().unwrap())
+                    .to_string_lossy()
+                    .into_owned();
+
+                (
+                    record::Item {
+                        path,
+                        name: file_name,
+                        date: DateTime::default(),
+                        tags: HashSet::<Tag>::default(),
+                        from_metadata: false,
+                    },
+                    false,
+                )
             };
 
             let mut file = File::open(entry.path()).expect("failed to open pdf");
@@ -385,23 +410,21 @@ fn scan_drive(root: &str) -> anyhow::Result<()> {
 
             match unsafe { RECORDS.entry(blake3::hash(&buffer).to_string()) } {
                 Vacant(vacant) => {
-                    vacant.insert(record::Item {
-                        path: entry.path().to_string_lossy().into_owned(),
-                        name: item_name,
-                        date: item_date,
-                        tags: item_tags,
-                        name_from_meta: has_meta_data,
-                    });
+                    vacant.insert(item);
                 }
                 Occupied(mut occupant) => {
                     let record = occupant.get_mut();
                     duplicates += 1;
 
-                    if has_meta_data && !record.name_from_meta {
-                        record.tags.extend(item_tags);
-                        record.name = item_name;
-                        record.date = item_date;
-                        record.name_from_meta = true;
+                    if has_metadata && !record.from_metadata {
+                        record.tags.extend(item.tags.clone());
+                        record.name = item.name;
+                        record.date = item.date;
+                        record.from_metadata = true;
+                    } else {
+                        record.tags.extend(item.tags.clone());
+                        record.name = item.name;
+                        record.date = item.date;
                     }
                 }
             }
@@ -436,7 +459,7 @@ fn main() -> anyhow::Result<()> {
             };
 
             let tags = if has_tags {
-                Vec::from_iter(item.tags.clone()).join(", ")
+                Vec::from_iter(item.tags.iter().map(|t| t.name.as_str())).join(", ")
             } else {
                 String::default()
             };
