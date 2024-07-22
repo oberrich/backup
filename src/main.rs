@@ -391,6 +391,8 @@ fn scan_drive(root: &str) -> anyhow::Result<()> {
                     .to_string_lossy()
                     .into_owned();
 
+                // TODO: Extract dates and non-prefixed names from file stem
+
                 (
                     record::Item {
                         path,
