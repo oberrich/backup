@@ -1,12 +1,13 @@
 use anyhow::Error;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use core::ptr::addr_of_mut;
 use core::{
     fmt,
     fmt::{Display, Formatter},
 };
 use once_cell::sync::Lazy;
-use record::Tag;
+use record::{Item, MetaDataType, Tag};
+use regex::Regex;
 use sanitize_filename_reader_friendly::sanitize;
 use serde_json::{Result, Value};
 use std::borrow::{Borrow, BorrowMut};
@@ -23,9 +24,17 @@ use walkdir::{DirEntry, WalkDir};
 use std::collections::HashSet;
 
 mod record {
-    use std::collections::HashSet;
+    use std::{collections::HashSet, default};
 
     use chrono::{DateTime, Utc};
+
+    #[derive(PartialEq, Eq, Copy, Clone, Default)]
+    pub enum MetaDataType {
+        #[default]
+        None,
+        Stem,
+        Docspell,
+    }
 
     #[derive(Hash, Eq, PartialEq, Debug, Clone)]
     pub struct Tag {
@@ -33,13 +42,13 @@ mod record {
         pub category: String,
     }
 
-    #[derive(Default, Eq, PartialEq, Debug, Clone)]
+    #[derive(Default, Eq, PartialEq, Clone)]
     pub struct Item {
         pub path: String,
         pub name: String,
         pub date: DateTime<Utc>,
         pub tags: HashSet<Tag>,
-        pub from_metadata: bool,
+        pub metadata_type: MetaDataType,
     }
 }
 
@@ -313,6 +322,7 @@ struct MetaData {
 
 fn scan_drive(root: &str) -> anyhow::Result<()> {
     let mut duplicates = 0usize;
+    let re_numeric_prefix = Regex::new(r"^(\d+)_(.*?)$").unwrap();
 
     for entry in WalkDir::new(root)
         .follow_links(true)
@@ -369,7 +379,7 @@ fn scan_drive(root: &str) -> anyhow::Result<()> {
                             name,
                             date,
                             tags,
-                            from_metadata: true,
+                            metadata_type: record::MetaDataType::Docspell,
                         })
                     } else {
                         None
@@ -381,28 +391,40 @@ fn scan_drive(root: &str) -> anyhow::Result<()> {
                 None
             };
 
-            let (item, has_metadata) = if let Some(item) = docspell_item {
-                (item, true)
+            let item = if let Some(item) = docspell_item {
+                item
             } else {
-                let file_name = entry
-                    .path()
-                    .file_stem()
-                    .unwrap_or(entry.path().file_name().unwrap())
-                    .to_string_lossy()
+                let file_stem = re_numeric_prefix
+                    .replace(
+                        &entry
+                            .path()
+                            .file_stem()
+                            .unwrap_or(entry.path().file_name().unwrap())
+                            .to_string_lossy(),
+                        "$2",
+                    )
                     .into_owned();
 
-                // TODO: Extract dates and non-prefixed names from file stem
+                let date_part = &file_stem[0..file_stem.len().min(10)];
+                let date = NaiveDate::parse_from_str(date_part, "%F").map(|naive| {
+                    naive
+                        .and_hms_milli_opt(0, 0, 0, 0)
+                        .unwrap()
+                        .and_local_timezone(Utc)
+                        .unwrap()
+                });
 
-                (
-                    record::Item {
-                        path,
-                        name: file_name,
-                        date: DateTime::default(),
-                        tags: HashSet::<Tag>::default(),
-                        from_metadata: false,
+                Item {
+                    path,
+                    name: file_stem,
+                    date: date.unwrap_or_default(),
+                    tags: HashSet::<Tag>::default(),
+                    metadata_type: if date.is_ok() {
+                        MetaDataType::Stem
+                    } else {
+                        MetaDataType::None
                     },
-                    false,
-                )
+                }
             };
 
             let mut file = File::open(entry.path()).expect("failed to open pdf");
@@ -418,13 +440,9 @@ fn scan_drive(root: &str) -> anyhow::Result<()> {
                     let record = occupant.get_mut();
                     duplicates += 1;
 
-                    if has_metadata && !record.from_metadata {
-                        record.tags.extend(item.tags.clone());
-                        record.name = item.name;
-                        record.date = item.date;
-                        record.from_metadata = true;
-                    } else {
-                        record.tags.extend(item.tags.clone());
+                    record.tags.extend(item.tags.clone());
+
+                    if (item.metadata_type as usize) > (record.metadata_type as usize) {
                         record.name = item.name;
                         record.date = item.date;
                     }
@@ -447,6 +465,7 @@ fn main() -> anyhow::Result<()> {
 
     let mut tagged = 0usize;
     let mut untagged = 0usize;
+    let mut with_date = 0usize;
     // tagged: 369, untagged: 928
     // tagged: 489, untagged: 1255
     // tagged: 489, untagged: 808
@@ -459,6 +478,10 @@ fn main() -> anyhow::Result<()> {
             } else {
                 untagged += 1
             };
+
+            if item.metadata_type != MetaDataType::None {
+                with_date += 1;
+            }
 
             let tags = if has_tags {
                 Vec::from_iter(item.tags.iter().map(|t| t.name.as_str())).join(", ")
@@ -479,6 +502,9 @@ fn main() -> anyhow::Result<()> {
         });
     }
 
-    println!("tagged: {}, untagged: {}", tagged, untagged);
+    println!(
+        "tagged: {}, untagged: {}, with_date: {}",
+        tagged, untagged, with_date
+    );
     Ok(())
 }
