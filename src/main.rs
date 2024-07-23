@@ -438,14 +438,14 @@ fn scan_drive(root: &str) -> anyhow::Result<()> {
                 }
                 Occupied(mut occupant) => {
                     let record = occupant.get_mut();
-                    duplicates += 1;
-
-                    record.tags.extend(item.tags.clone());
 
                     if (item.metadata_type as usize) > (record.metadata_type as usize) {
                         record.name = item.name;
                         record.date = item.date;
                     }
+
+                    record.tags.extend(item.tags);
+                    duplicates += 1;
                 }
             }
         }
