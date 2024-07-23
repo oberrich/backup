@@ -1,30 +1,24 @@
-use anyhow::Error;
-use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
-use core::ptr::addr_of_mut;
-use core::{
-    fmt,
-    fmt::{Display, Formatter},
-};
+use chrono::{DateTime, NaiveDate, Utc};
+use core::fmt::{self, Display, Formatter};
 use once_cell::sync::Lazy;
 use record::{Item, MetaDataType, Tag};
 use regex::Regex;
 use sanitize_filename_reader_friendly::sanitize;
-use serde_json::{Result, Value};
-use std::borrow::{Borrow, BorrowMut};
+use serde_json::Value;
 use std::collections::btree_map::Entry::{Occupied, Vacant};
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::ffi::OsString;
+use std::fs;
 use std::fs::File;
 use std::io::{BufReader, Read};
 use std::os::windows::ffi::OsStringExt;
-use std::{default, fs};
 use walkdir::{DirEntry, WalkDir};
 
 use std::collections::HashSet;
 
 mod record {
-    use std::{collections::HashSet, default};
+    use std::collections::HashSet;
 
     use chrono::{DateTime, Utc};
 
@@ -445,26 +439,25 @@ fn scan_drive(root: &str) -> anyhow::Result<()> {
 }
 
 fn main() -> anyhow::Result<()> {
-    let _ = fs::remove_dir_all("C:\\tagged");
-    let _ = fs::remove_dir_all("C:\\untagged");
-    fs::create_dir("C:\\tagged")?;
-    fs::create_dir("C:\\untagged")?;
+    let _ = fs::remove_dir_all("C:\\consume");
+    fs::create_dir("C:\\consume")?;
 
     scan_drive(r#"C:\Users\root\Desktop\business\0"#)?;
 
     let mut tagged = 0usize;
     let mut untagged = 0usize;
     let mut with_date = 0usize;
-    // tagged: 369, untagged: 928
-    // tagged: 489, untagged: 1255
-    // tagged: 489, untagged: 808
 
     unsafe {
-        RECORDS.values().for_each(|item| {
+        RECORDS.values_mut().for_each(|item| {
             let has_tags = !item.tags.is_empty();
             if has_tags {
                 tagged += 1
             } else {
+                item.tags.insert(Tag {
+                    name: "".to_owned(),
+                    category: "".to_owned(),
+                });
                 untagged += 1
             };
 
@@ -472,22 +465,24 @@ fn main() -> anyhow::Result<()> {
                 with_date += 1;
             }
 
-            let tags = if has_tags {
-                Vec::from_iter(item.tags.iter().map(|t| t.name.as_str())).join(", ")
-            } else {
-                String::default()
-            };
+            item.tags.iter().for_each(|tag| {
+                let tags = if has_tags {
+                    Vec::from_iter(item.tags.iter().map(|t| t.name.as_str())).join(", ")
+                } else {
+                    String::default()
+                };
 
-            let new_path = format!(
-                r#"C:\{}\{} {}.pdf"#,
-                if has_tags { "tagged" } else { "untagged" },
-                item.date.format("%Y-%m-%d"),
-                sanitize(&item.name)
-            );
+                let dir = format!(r#"C:\consume\{}\{}"#, tag.category, tag.name);
+                let _ = fs::create_dir_all(&dir);
+                let new_path = format!(
+                    r#"{dir}\{} {}.pdf"#,
+                    item.date.format("%Y-%m-%d"),
+                    sanitize(&item.name)
+                );
 
-            // TODO: Add tags to folder structure (parse tag category meta_data["category"], prefer "business" over "private")
-            println!("copy `{}` -> `{}` ({})", &item.path, &new_path, tags);
-            fs::copy(&item.path, &new_path).expect("failed to copy");
+                println!("copy `{}` -> `{}` ({})", &item.path, &new_path, tags);
+                fs::copy(&item.path, &new_path).expect("failed to copy");
+            });
         });
     }
 
