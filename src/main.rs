@@ -1,5 +1,5 @@
 use anyhow::Error;
-use chrono::{DateTime, NaiveDate, Utc};
+use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
 use core::ptr::addr_of_mut;
 use core::{
     fmt,
@@ -313,13 +313,6 @@ impl Display for EntryClassification {
     }
 }
 
-struct MetaData {
-    name: String,
-    date: DateTime<Utc>,
-    tags: HashSet<String>,
-    category: String,
-}
-
 fn scan_drive(root: &str) -> anyhow::Result<()> {
     let mut duplicates = 0usize;
     let re_numeric_prefix = Regex::new(r"^(\d+)_(.*?)$").unwrap();
@@ -355,15 +348,11 @@ fn scan_drive(root: &str) -> anyhow::Result<()> {
                     metadata_pb.push("metadata.json");
 
                     if let Ok(meta_file) = File::open(&metadata_pb) {
-                        let meta_reader = BufReader::new(meta_file);
-                        let meta_data: Value = serde_json::from_reader(meta_reader)?;
-
+                        let meta_data: Value = serde_json::from_reader(BufReader::new(meta_file))?;
                         let name = meta_data["name"].as_str().unwrap().to_owned();
-                        let date = DateTime::<Utc>::from_timestamp_millis(
-                            meta_data["date"].as_i64().expect("has no date"),
-                        )
-                        .unwrap();
-
+                        let date =
+                            DateTime::from_timestamp_millis(meta_data["date"].as_i64().unwrap())
+                                .expect("invalid timestamp");
                         let tags = HashSet::from_iter(
                             meta_data["tags"].as_array().unwrap().iter().map(|v| {
                                 let meta = v.as_object().unwrap();
@@ -379,7 +368,7 @@ fn scan_drive(root: &str) -> anyhow::Result<()> {
                             name,
                             date,
                             tags,
-                            metadata_type: record::MetaDataType::Docspell,
+                            metadata_type: MetaDataType::Docspell,
                         })
                     } else {
                         None
