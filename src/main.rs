@@ -465,24 +465,18 @@ fn main() -> anyhow::Result<()> {
                 with_date += 1;
             }
 
-            item.tags.iter().for_each(|tag| {
-                let tags = if has_tags {
-                    Vec::from_iter(item.tags.iter().map(|t| t.name.as_str())).join(", ")
-                } else {
-                    String::default()
-                };
+            let sub_dirs = Vec::from_iter(item.tags.iter().map(|t| t.name.to_owned())).join("/");
+            let dir = format!(r#"C:\consume\{}"#, sub_dirs);
+            let _ = fs::create_dir_all(&dir);
 
-                let dir = format!(r#"C:\consume\{}\{}"#, tag.category, tag.name);
-                let _ = fs::create_dir_all(&dir);
-                let new_path = format!(
-                    r#"{dir}\{} {}.pdf"#,
-                    item.date.format("%Y-%m-%d"),
-                    sanitize(&item.name)
-                );
+            let dest = format!(
+                r#"{dir}\{} {}.pdf"#,
+                item.date.format("%Y-%m-%d"),
+                sanitize(&item.name)
+            );
 
-                println!("copy `{}` -> `{}` ({})", &item.path, &new_path, tags);
-                fs::copy(&item.path, &new_path).expect("failed to copy");
-            });
+            println!("copy to `{}`", &dest);
+            fs::copy(&item.path, &dest).expect("failed to copy");
         });
     }
 
